@@ -41,6 +41,7 @@ struct Cli {
     #[clap(short, long, action)]
     wait: bool,
     paths: Vec<PathBuf>,
+    // paths: Vec<String>,
 }
 
 pub fn build_window(data: &mut LapceWindowData) -> impl Widget<LapceData> {
@@ -74,12 +75,15 @@ pub fn launch() {
         return;
     }
     let pwd = std::env::current_dir().unwrap_or_default();
-    let paths: Vec<PathBuf> = cli
-        .paths
-        .iter()
-        .map(|p| pwd.join(p).canonicalize().unwrap_or_default())
-        .collect();
-    if !cli.new && LapceData::try_open_in_existing_process(&paths).is_ok() {
+    if !cli.new
+        && LapceData::try_open_in_existing_process(
+            &cli.paths
+                .iter()
+                .map(|p| pwd.join(p).canonicalize().unwrap_or_default())
+                .collect::<Vec<_>>(),
+        )
+        .is_ok()
+    {
         return;
     }
 
@@ -136,7 +140,8 @@ pub fn launch() {
         .install_panic_hook();
 
     let mut launcher = AppLauncher::new().delegate(LapceAppDelegate::new());
-    let mut data = LapceData::load(launcher.get_external_handle(), paths, log_file);
+    let mut data =
+        LapceData::load(launcher.get_external_handle(), cli.paths, log_file);
 
     for (_window_id, window_data) in data.windows.iter_mut() {
         let root = build_window(window_data);

@@ -45,6 +45,7 @@ use lsp_types::{Diagnostic, DiagnosticSeverity, Position, ProgressToken, TextEdi
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use smallvec::SmallVec;
 
 use crate::{
     about::AboutData,
@@ -61,7 +62,10 @@ use crate::{
         SplitInfo, TabsInfo, WindowInfo, WorkspaceInfo,
     },
     document::{BufferContent, Document, LocalBufferKind},
-    editor::{EditorLocation, EditorPosition, LapceEditorBufferData, Line, TabRect},
+    editor::{
+        EditorLocation, EditorPosition, LapceEditorBufferData, Line, LineCol,
+        TabRect,
+    },
     explorer::FileExplorerData,
     find::Find,
     hover::HoverData,
@@ -112,6 +116,15 @@ pub struct LapceData {
     pub active_window: Arc<WindowId>,
 }
 
+/// It is a path that exists on disk and is pointing at a regular
+/// file or at a directory.
+pub enum PathType {
+    /// Indicate the path that exists on disk and is pointing at a regular file.
+    File(PathBuf, Option<LineCol>),
+    /// Indicate the path that exists on disk and is pointing at a directory.
+    Directory(PathBuf),
+}
+
 impl LapceData {
     /// Create a new `LapceData` struct by loading configuration, and state
     /// previously written to the Lapce database.
@@ -132,8 +145,19 @@ impl LapceData {
             .unwrap_or_else(|_| Self::default_panel_orders());
         let latest_release = Arc::new(None);
 
-        let dirs: Vec<&PathBuf> = paths.iter().filter(|p| p.is_dir()).collect();
-        let files: Vec<&PathBuf> = paths.iter().filter(|p| p.is_file()).collect();
+        let mut dirs = SmallVec::<[PathBuf; 3]>::new();
+        let mut files = SmallVec::<[(PathBuf, Option<LineCol>); 3]>::new();
+        let pwd = std::env::current_dir().unwrap_or_default();
+
+        paths.iter().for_each(|path| {
+            if let Some(path_type) = Self::resolve_path(path, &pwd) {
+                match path_type {
+                    PathType::File(file, line_col) => files.push((file, line_col)),
+                    PathType::Directory(directory) => dirs.push(directory),
+                }
+            }
+        });
+
         if !dirs.is_empty() {
             let (size, mut pos) = db
                 .get_last_window_info()
@@ -228,12 +252,31 @@ impl LapceData {
         }
 
         if let Some((window_id, _)) = windows.iter().next() {
-            for file in files {
-                let _ = event_sink.submit_command(
-                    LAPCE_UI_COMMAND,
-                    LapceUICommand::OpenFile(file.to_path_buf(), false),
-                    Target::Window(*window_id),
-                );
+            for (file, linecol) in files {
+                if let Some(pos) = linecol {
+                    // jump to line and column
+                    let _ = event_sink.submit_command(
+                        LAPCE_UI_COMMAND,
+                        LapceUICommand::JumpToLineColLocation(
+                            None,
+                            EditorLocation {
+                                path: file,
+                                position: Some(pos), // line info is included in column variable
+                                scroll_offset: None,
+                                history: None,
+                            },
+                            true,
+                        ),
+                        Target::Auto,
+                    );
+                } else {
+                    // open the file
+                    let _ = event_sink.submit_command(
+                        LAPCE_UI_COMMAND,
+                        LapceUICommand::OpenFile(file, false),
+                        Target::Window(*window_id),
+                    );
+                }
             }
         }
 
@@ -273,6 +316,106 @@ impl LapceData {
             update_in_process: false,
             log_file,
         }
+    }
+
+    #[inline]
+    pub fn resolve_path<T: AsRef<Path>>(path: T, base: &Path) -> Option<PathType> {
+        if path.as_ref().is_absolute() {
+            Self::parse_path(path)
+        } else {
+            Self::parse_path(base.join(path))
+        }
+    }
+
+    #[inline]
+    fn parse_path<T: AsRef<Path>>(path: T) -> Option<PathType> {
+        fn write_text_with_sep_to<'a, I>(mut iter: I, buf: &mut String, sep: &str)
+        where
+            I: Iterator<Item = &'a str>,
+        {
+            if let Some(str) = iter.next() {
+                buf.push_str(str);
+                buf.push_str(sep);
+                write_text_with_sep_to(iter, buf, sep);
+            }
+        }
+
+        if let Ok(path_buf) = path.as_ref().canonicalize() {
+            if path_buf.is_file() {
+                return Some(PathType::File(path_buf, None));
+            } else if path_buf.is_dir() {
+                return Some(PathType::Directory(path_buf));
+            }
+        }
+
+        if let Some(str) = path.as_ref().to_str() {
+            let mut splits = str.rsplit(':');
+            if let Some(first_rhs) = splits.next() {
+                if let Ok(first_rhs_num) = first_rhs.parse::<usize>() {
+                    if let Some(second_rhs) = splits.next() {
+                        match second_rhs.parse::<usize>() {
+                            Ok(second_rhs_num) => {
+                                let mut str = String::new();
+                                write_text_with_sep_to(splits.rev(), &mut str, ":");
+
+                                if let Ok(left_path) =
+                                    PathBuf::from(&str[..str.len() - 1])
+                                        .canonicalize()
+                                {
+                                    if left_path.is_file() {
+                                        return Some(PathType::File(
+                                            left_path,
+                                            Some(LineCol {
+                                                line: second_rhs_num,
+                                                column: first_rhs_num,
+                                            }),
+                                        ));
+                                    }
+                                }
+                                // We have some second right hand number, but the remaining path isn't a file,
+                                // then let's check if it changed if we add `second_rhs`?
+                                // Last char of `str` is ":", so we neen to push only `second_rhs`
+                                str.push_str(second_rhs);
+                                if let Ok(left_path) =
+                                    PathBuf::from(str).canonicalize()
+                                {
+                                    if left_path.is_file() {
+                                        return Some(PathType::File(
+                                            left_path,
+                                            Some(LineCol {
+                                                line: first_rhs_num,
+                                                column: 1,
+                                            }),
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                let mut str = String::new();
+                                write_text_with_sep_to(splits.rev(), &mut str, ":");
+                                str.push_str(second_rhs);
+
+                                if let Ok(left_path) =
+                                    PathBuf::from(str).canonicalize()
+                                {
+                                    if left_path.is_file() {
+                                        return Some(PathType::File(
+                                            left_path,
+                                            Some(LineCol {
+                                                line: first_rhs_num,
+                                                column: 1,
+                                            }),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Ignore the path if it doesn't refer to a file
+        None
     }
 
     pub fn default_panel_orders() -> PanelOrder {
