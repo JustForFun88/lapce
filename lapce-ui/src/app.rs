@@ -1,7 +1,3 @@
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-use std::{path::PathBuf, process::Stdio, sync::Arc};
-
 use clap::Parser;
 use druid::{
     AppDelegate, AppLauncher, Command, Env, Event, LocalizedString, Point, Region,
@@ -14,6 +10,7 @@ use druid::{Menu, MenuItem, SysMods};
 use lapce_core::command::{EditCommand, FocusCommand};
 use lapce_core::meta;
 use lapce_data::{
+    cli::PathObject,
     command::{LapceUICommand, LAPCE_UI_COMMAND},
     config::LapceConfig,
     data::{
@@ -22,6 +19,9 @@ use lapce_data::{
     },
     db::{TabsInfo, WindowInfo},
 };
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+use std::{process::Stdio, sync::Arc};
 
 use crate::{
     logging::override_log_levels,
@@ -40,7 +40,8 @@ struct Cli {
     /// Don't return instantly when opened in terminal
     #[clap(short, long, action)]
     wait: bool,
-    paths: Vec<PathBuf>,
+    #[clap(value_parser = clap::value_parser!(PathObject))]
+    paths: Vec<PathObject>,
 }
 
 pub fn build_window(data: &mut LapceWindowData) -> impl Widget<LapceData> {
@@ -73,13 +74,7 @@ pub fn launch() {
         };
         return;
     }
-    let pwd = std::env::current_dir().unwrap_or_default();
-    let paths: Vec<PathBuf> = cli
-        .paths
-        .iter()
-        .map(|p| pwd.join(p).canonicalize().unwrap_or_default())
-        .collect();
-    if !cli.new && LapceData::try_open_in_existing_process(&paths).is_ok() {
+    if !cli.new && LapceData::try_open_in_existing_process(&cli.paths).is_ok() {
         return;
     }
 
@@ -136,7 +131,7 @@ pub fn launch() {
         .install_panic_hook();
 
     let mut launcher = AppLauncher::new().delegate(LapceAppDelegate::new());
-    let mut data = LapceData::load(launcher.get_external_handle(), paths, log_file);
+    let mut data = LapceData::load(launcher.get_external_handle(), cli.paths, log_file);
 
     for (_window_id, window_data) in data.windows.iter_mut() {
         let root = build_window(window_data);

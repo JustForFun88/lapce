@@ -37,3 +37,4 @@ mod svg;
 pub mod terminal;
 pub mod title;
 pub mod update;
+pub mod cli;

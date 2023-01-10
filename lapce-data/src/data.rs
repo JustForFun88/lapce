@@ -49,6 +49,7 @@ use serde_json::Value;
 use crate::{
     about::AboutData,
     alert::{AlertContentData, AlertData},
+    cli::PathObject,
     command::{
         CommandKind, EnsureVisiblePosition, InitBufferContentCb, LapceCommand,
         LapceUICommand, LapceWorkbenchCommand, LAPCE_COMMAND, LAPCE_OPEN_FILE,
@@ -61,7 +62,10 @@ use crate::{
         SplitInfo, TabsInfo, WindowInfo, WorkspaceInfo,
     },
     document::{BufferContent, Document, LocalBufferKind},
-    editor::{EditorLocation, EditorPosition, LapceEditorBufferData, Line, TabRect},
+    editor::{
+        EditorLocation, EditorPosition, LapceEditorBufferData, Line, LineCol,
+        TabRect,
+    },
     explorer::FileExplorerData,
     find::Find,
     hover::HoverData,
@@ -84,6 +88,7 @@ use crate::{
     title::TitleData,
     update::ReleaseInfo,
 };
+use smallvec::SmallVec;
 
 /// `LapceData` is the topmost structure in a tree of structures that holds
 /// the application model for Lapce.
@@ -117,7 +122,7 @@ impl LapceData {
     /// previously written to the Lapce database.
     pub fn load(
         event_sink: ExtEventSink,
-        paths: Vec<PathBuf>,
+        paths: Vec<PathObject>,
         log_file: Option<PathBuf>,
     ) -> Self {
         let _ = lapce_proxy::register_lapce_path();
@@ -132,8 +137,14 @@ impl LapceData {
             .unwrap_or_else(|_| Self::default_panel_orders());
         let latest_release = Arc::new(None);
 
-        let dirs: Vec<&PathBuf> = paths.iter().filter(|p| p.is_dir()).collect();
-        let files: Vec<&PathBuf> = paths.iter().filter(|p| p.is_file()).collect();
+        let mut dirs = SmallVec::<[PathBuf; 3]>::new();
+        let mut files = SmallVec::<[(PathBuf, Option<LineCol>); 3]>::new();
+
+        paths.into_iter().for_each(|path| match path {
+            PathObject::File(file, line_col) => files.push((file, line_col)),
+            PathObject::Directory(directory) => dirs.push(directory),
+        });
+
         if !dirs.is_empty() {
             let (size, mut pos) = db
                 .get_last_window_info()
@@ -228,12 +239,31 @@ impl LapceData {
         }
 
         if let Some((window_id, _)) = windows.iter().next() {
-            for file in files {
-                let _ = event_sink.submit_command(
-                    LAPCE_UI_COMMAND,
-                    LapceUICommand::OpenFile(file.to_path_buf(), false),
-                    Target::Window(*window_id),
-                );
+            for (file, linecol) in files {
+                if let Some(pos) = linecol {
+                    // jump to line and column
+                    let _ = event_sink.submit_command(
+                        LAPCE_UI_COMMAND,
+                        LapceUICommand::JumpToLineColLocation(
+                            None,
+                            EditorLocation {
+                                path: file,
+                                position: Some(pos), // line info is included in column variable
+                                scroll_offset: None,
+                                history: None,
+                            },
+                            true,
+                        ),
+                        Target::Auto,
+                    );
+                } else {
+                    // open the file
+                    let _ = event_sink.submit_command(
+                        LAPCE_UI_COMMAND,
+                        LapceUICommand::OpenFile(file, false),
+                        Target::Window(*window_id),
+                    );
+                }
             }
         }
 
@@ -354,13 +384,20 @@ impl LapceData {
         Ok(())
     }
 
-    pub fn try_open_in_existing_process(paths: &[PathBuf]) -> Result<()> {
+    pub fn try_open_in_existing_process(paths: &[PathObject]) -> Result<()> {
         let local_socket = Directory::local_socket()
             .ok_or_else(|| anyhow!("can't get local socket folder"))?;
         let mut socket =
             interprocess::local_socket::LocalSocketStream::connect(local_socket)?;
-        let folders: Vec<_> = paths.iter().filter(|p| p.is_dir()).cloned().collect();
-        let files: Vec<_> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+
+        let mut folders = Vec::new();
+        let mut files = Vec::new();
+
+        paths.into_iter().for_each(|path| match path {
+            PathObject::File(file, _) => files.push(file.clone()),
+            PathObject::Directory(directory) => folders.push(directory.clone()),
+        });
+
         let msg: CoreMessage =
             RpcMessage::Notification(CoreNotification::OpenPaths {
                 window_tab_id: None,
