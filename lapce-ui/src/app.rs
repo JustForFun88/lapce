@@ -74,7 +74,7 @@ pub fn launch() {
         };
         return;
     }
-    if !cli.new && LapceData::try_open_in_existing_process(&cli.paths).is_ok() {
+    if !cli.new && LapceData::try_open_in_existing_process(dbg!(&cli.paths)).is_ok() {
         return;
     }
 
@@ -131,7 +131,7 @@ pub fn launch() {
         .install_panic_hook();
 
     let mut launcher = AppLauncher::new().delegate(LapceAppDelegate::new());
-    let mut data = LapceData::load(launcher.get_external_handle(), cli.paths, log_file);
+    let mut data = LapceData::load(launcher.get_external_handle(), dbg!(cli.paths), log_file);
 
     for (_window_id, window_data) in data.windows.iter_mut() {
         let root = build_window(window_data);

@@ -140,10 +140,14 @@ impl LapceData {
         let mut dirs = SmallVec::<[PathBuf; 3]>::new();
         let mut files = SmallVec::<[(PathBuf, Option<LineCol>); 3]>::new();
 
+        let paths = dbg!(paths);
         paths.into_iter().for_each(|path| match path {
             PathObject::File(file, line_col) => files.push((file, line_col)),
             PathObject::Directory(directory) => dirs.push(directory),
         });
+
+        let dirs = dbg!(dirs);
+        let files = dbg!(files);
 
         if !dirs.is_empty() {
             let (size, mut pos) = db
@@ -239,7 +243,7 @@ impl LapceData {
         }
 
         if let Some((window_id, _)) = windows.iter().next() {
-            for (file, linecol) in files {
+            for (file, linecol) in dbg!(files) {
                 if let Some(pos) = linecol {
                     // jump to line and column
                     let _ = event_sink.submit_command(
